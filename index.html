@@ -194,6 +194,10 @@
           <label>Announce early subs
             <select id="announceEarly"><option value="1">Yes</option><option value="0">No</option></select>
           </label>
+          <label>Late early sub counts as the call
+            <select id="earlyCounts"><option value="1">Yes</option><option value="0">No</option></select>
+          </label>
+          <p class="note">If a player subs off early in the last 25% of the countdown, that counts as their team's sub and nobody from that team is called off when the timer runs out.</p>
         </div>
       </div>
 
@@ -258,7 +262,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const SKEY = 'subcaller-ipad', GKEY = 'subcaller-ipad-game';
-const fields = ['mode','mins','secs','perCall','order','twice','warnBeep','announceEarly','nameA','playersA','nameB','playersB'];
+const fields = ['mode','mins','secs','perCall','order','twice','warnBeep','announceEarly','earlyCounts','nameA','playersA','nameB','playersB'];
 function load(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch(e) { return d; } }
 function store(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e) {} }
 
@@ -275,6 +279,7 @@ const tname = i => $(i ? 'nameB' : 'nameA').value.trim() || ('Team ' + (i + 1));
 // ---------- Game state (persisted so a reload mid-game keeps the order) ----------
 let teams = [];            // [{queue:[...], out:Set}]
 let undoStack = [];
+let credit = [false, false];   // team already subbed early near the end of this turn, so skip it at the call
 function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 function freshTeam(i) { const q = Array.from({length: count(i)}, (_, k) => k + 1); return {queue: $('order').value === 'shuffle' ? shuffle(q) : q, out: new Set()}; }
 function saveGame() { store(GKEY, teams.map(t => ({queue: t.queue, out: [...t.out]}))); }
@@ -286,14 +291,16 @@ function loadGame() {
     return freshTeam(i);
   });
 }
-function snapshot() { undoStack.push(JSON.stringify(teams.map(t => ({queue: t.queue, out: [...t.out]})))); if (undoStack.length > 20) undoStack.shift(); }
+function snapshot() { undoStack.push(JSON.stringify({teams: teams.map(t => ({queue: t.queue, out: [...t.out]})), credit})); if (undoStack.length > 20) undoStack.shift(); }
 function undo() {
   const s = undoStack.pop(); if (!s) return;
-  teams = JSON.parse(s).map(t => ({queue: t.queue, out: new Set(t.out)}));
+  const u = JSON.parse(s);
+  teams = u.teams.map(t => ({queue: t.queue, out: new Set(t.out)})); credit = u.credit;
   addLog('Undo'); changed();
 }
 
 const peek = t => t.queue.filter(n => !t.out.has(n)).slice(0, perCall());
+const toCall = () => teams.map((t, i) => ({i, nums: credit[i] ? [] : peek(t)})).filter(c => c.nums.length);
 function moveToEnd(t, nums) { t.queue = t.queue.filter(n => !nums.includes(n)).concat(nums); }
 function changed() { saveGame(); renderTeams(); renderOut(); $('undoBtn').disabled = !undoStack.length; }
 
@@ -309,7 +316,7 @@ function renderTeams() {
     const nums = Array.from({length: count(i)}, (_, k) => k + 1);
     const grid = nums.filter(n => !t.out.has(n)).map(n => `<button class="num${next.has(n) ? ' next' : ''}" data-i="${i}" data-n="${n}">${n}</button>`).join('');
     const line = t.queue.filter(n => !t.out.has(n)).map(n => `<span class="chip${next.has(n) ? ' next' : ''}">${n}</span>`).join('');
-    const nextTxt = next.size ? [...next].map(n => '#' + n).join(' & ') : 'nobody';
+    const nextTxt = credit[i] ? 'nobody this turn (early sub)' : next.size ? [...next].map(n => '#' + n).join(' & ') : 'nobody';
     const outs = nums.filter(n => t.out.has(n));
     const outCol = outs.length
       ? outs.map(n => `<button class="backbtn" data-bi="${i}" data-bn="${n}"><span>${n}</span></button>`).join('') + '<div class="holdhint">Hold your number to come back in</div>'
@@ -398,8 +405,12 @@ function flash() { const el = $('topBar'); el.classList.remove('flash'); void el
 function fire() {
   if (simple()) { speakAfterBeep('Sub.'); addLog('Sub'); $('status').textContent = 'Sub called'; flash(); return; }
   snapshot();
-  const called = teams.map((t, i) => ({i, nums: peek(t)})).filter(c => c.nums.length);
+  const called = toCall();
+  const skipped = [0, 1].filter(i => credit[i]);
+  credit = [false, false];
   called.forEach(c => moveToEnd(teams[c.i], c.nums));
+  if (skipped.length) addLog(skipped.map(i => tname(i)).join(' and ') + ' skipped (already subbed early)');
+  if (!called.length && skipped.length) $('status').textContent = 'No call, both teams already subbed early';
   if (called.length) {
     speakAfterBeep(callLine(called));
     const txt = called.map(c => `${tname(c.i)} ${c.nums.map(n => '#' + n).join(' & ')}`).join(', ');
@@ -412,7 +423,10 @@ function earlySub(i, n) {
   moveToEnd(teams[i], [n]);
   if ($('announceEarly').value === '1') speakAfterBeep(`${tname(i)} ${n}.`);
   addLog(`${tname(i)} #${n} off (early)`);
-  $('status').textContent = `${tname(i)} #${n} subbed early`;
+  const left = running ? deadline - Date.now() : remaining;
+  const counts = $('earlyCounts').value === '1' && (running || remaining < intervalMs()) && left <= intervalMs() * 0.25;
+  if (counts) credit[i] = true;
+  $('status').textContent = `${tname(i)} #${n} subbed early` + (counts ? `, counts as ${tname(i)}'s sub this turn` : '');
   changed();
 }
 
@@ -458,7 +472,7 @@ function start() {
 function pause() { running = false; clearInterval(timer); remaining = Math.max(0, deadline - Date.now()); $('status').textContent = 'Paused'; renderClock(); }
 function resetGame() {
   running = false; clearInterval(timer); remaining = intervalMs(); warned = false;
-  teams = [freshTeam(0), freshTeam(1)]; undoStack = [];
+  teams = [freshTeam(0), freshTeam(1)]; undoStack = []; credit = [false, false];
   logCount = 0; $('log').textContent = 'None yet'; $('status').textContent = 'Ready';
   if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
   changed(); renderClock();
@@ -521,7 +535,7 @@ $('nowBtn').onclick = () => { setupAudio(); fire(); if (running) { deadline = Da
 $('testBtn').onclick = () => {
   setupAudio();
   if (simple()) return speakAfterBeep('Sub.');
-  const called = teams.map((t, i) => ({i, nums: peek(t)})).filter(c => c.nums.length);
+  const called = toCall();
   if (called.length) speakAfterBeep(callLine(called));
 };
 $('resetBtn').onclick = resetGame;
@@ -534,8 +548,9 @@ document.addEventListener('click', e => {
 });
 fields.forEach(f => $(f).addEventListener('change', () => {
   saveSettings();
-  if (f === 'playersA') { teams[0] = freshTeam(0); undoStack = []; }
-  if (f === 'playersB') { teams[1] = freshTeam(1); undoStack = []; }
+  if (f === 'playersA') { teams[0] = freshTeam(0); undoStack = []; credit[0] = false; }
+  if (f === 'playersB') { teams[1] = freshTeam(1); undoStack = []; credit[1] = false; }
+  if (f === 'earlyCounts' && $('earlyCounts').value !== '1') credit = [false, false];
   if (!running && (f === 'mins' || f === 'secs')) remaining = intervalMs();
   changed(); renderClock();
 }));
