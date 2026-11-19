@@ -344,7 +344,8 @@ let ctx = null, clipCurve = null;
 function setupAudio() {
   try { if (navigator.audioSession) navigator.audioSession.type = 'transient'; } catch(e) {}
   if (!ctx) { try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {} }
-  if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+  if (ctx && ctx.state === 'closed') { ctx = null; try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {} }
+  if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
   if (!setupAudio.done) { try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch(e) {} setupAudio.done = true; }
 }
 function beep(times, freq, len, gap) {
@@ -375,12 +376,15 @@ function loudBeep(times = 3, len = 0.38, gap = 0.1) {
   return (times * (len + gap) + 0.15) * 1000;
 }
 function say(text) { try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.rate = 0.95; u.volume = 1; speechSynthesis.speak(u); } catch(e) {} }
-function speakAfterBeep(line) { const w = loudBeep(); setTimeout(() => say($('twice').value === '1' ? `${line} ${line}` : line), w); }
+// iPad pauses the beep audio ("interrupted") after speech, other apps or going to the background: wake it before every beep
+function wakeAudio() {
+  if (!ctx || ctx.state === 'running') return Promise.resolve();
+  return Promise.race([ctx.resume().catch(() => {}), new Promise(r => setTimeout(r, 400))]);
+}
+function speakAfterBeep(line) { wakeAudio().then(() => { const w = loudBeep(); setTimeout(() => say($('twice').value === '1' ? `${line} ${line}` : line), w); }); }
+document.addEventListener('pointerdown', () => { if (ctx) setupAudio(); }, true);
 // Calls are short: "Black 4, White 5."
-// Same number(s) on both teams: just say the number, e.g. "4."
-const callLine = called => (called.length === 2 && called[0].nums.join() === called[1].nums.join())
-  ? called[0].nums.join(' and ') + '.'
-  : called.map(c => `${tname(c.i)} ${c.nums.join(' and ')}`).join(', ') + '.';
+const callLine = called => called.map(c => `${tname(c.i)} ${c.nums.join(' and ')}`).join(', ') + '.';
 
 // ---------- Log ----------
 let logCount = 0;
@@ -433,14 +437,14 @@ function comeBack(i, n) {
 // ---------- Timer ----------
 let running = false, deadline = 0, remaining = intervalMs(), timer = null, warned = false, wakeLock = null;
 async function keepAwake() { try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); } } catch(e) {} }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && running) keepAwake(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { wakeAudio(); if (running) keepAwake(); } });
 function renderClock() {
   $('clock').textContent = fmt(running ? Math.max(0, deadline - Date.now()) : remaining);
   $('startBtn').textContent = running ? 'Pause' : (remaining < intervalMs() ? 'Resume' : 'Start');
 }
 function tick() {
   const left = deadline - Date.now();
-  if ($('warnBeep').value === '1' && !warned && left <= 10000 && left > 0) { warned = true; beep(1, 700, 0.12, 0); }
+  if ($('warnBeep').value === '1' && !warned && left <= 10000 && left > 0) { warned = true; wakeAudio().then(() => beep(1, 700, 0.12, 0)); }
   if (left <= 0) { fire(); warned = false; deadline += intervalMs(); if (deadline < Date.now()) deadline = Date.now() + intervalMs(); }
   renderClock();
 }
