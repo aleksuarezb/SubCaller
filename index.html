@@ -604,7 +604,12 @@ fields.forEach(f => $(f).addEventListener('change', () => {
 loadGame(); changed(); renderClock();
 </script>
 <script>
-if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); }); }
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+  // When an updated version has been downloaded, switch to it straight away (but never mid-countdown)
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !running) location.reload(); });
+}
 </script>
 </body>
 </html>
