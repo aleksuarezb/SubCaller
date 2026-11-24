@@ -353,6 +353,7 @@ function setupAudio() {
   if (!ctx) { try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {} }
   if (ctx && ctx.state === 'closed') { ctx = null; try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {} }
   if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
+  if (ctx && !setupAudio.loaded) { setupAudio.loaded = true; const p = clipPlan([0, 1].map(i => ({i, nums: Array.from({length: count(i)}, (_, k) => k + 1)}))); if (p) [].concat(...p.map(g => [g[0]])).forEach(clip); }
   if (!setupAudio.done) { try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch(e) {} setupAudio.done = true; }
 }
 function beep(times, freq, len, gap) {
@@ -388,7 +389,51 @@ function wakeAudio() {
   if (!ctx || ctx.state === 'running') return Promise.resolve();
   return Promise.race([ctx.resume().catch(() => {}), new Promise(r => setTimeout(r, 400))]);
 }
-function speakAfterBeep(line) { wakeAudio().then(() => { const w = loudBeep(); setTimeout(() => say($('twice').value === '1' ? `${line} ${line}` : line), w); }); }
+// Recorded voice clips (voice/*.mp3) play through the same audio as the beep, so they follow Bluetooth speakers.
+// Falls back to the iPad voice when a clip isn't available (e.g. a custom team name).
+const VOICE = {};
+function clip(name) {
+  if (!VOICE[name]) {
+    VOICE[name] = fetch('voice/' + name + '.mp3').then(r => { if (!r.ok) throw new Error(name); return r.arrayBuffer(); })
+      .then(b => new Promise((res, rej) => ctx.decodeAudioData(b, res, rej)));
+    VOICE[name].catch(() => { delete VOICE[name]; });
+  }
+  return VOICE[name];
+}
+// called: [{i, nums}] for numbered calls, [] for "Sub". Returns clip names per team, or null if any are missing.
+function clipPlan(called) {
+  if (!called) return null;
+  if (!called.length) return [['sub']];
+  const plan = called.map(c => {
+    const col = tname(c.i).toLowerCase();
+    if ((col !== 'black' && col !== 'white') || c.nums.some(n => n < 1 || n > 30)) return null;
+    return [`${col}-${c.nums[0]}`].concat(c.nums.slice(1).map(n => `and-${n}`));
+  });
+  return plan.includes(null) ? null : plan;
+}
+let voiceSrcs = [];
+function stopVoice() { voiceSrcs.forEach(s => { try { s.stop(); } catch(e) {} }); voiceSrcs = []; try { speechSynthesis.cancel(); } catch(e) {} }
+function playClips(groups) {
+  const reps = $('twice').value === '1' ? 2 : 1;
+  let t = ctx.currentTime + 0.05;
+  for (let r = 0; r < reps; r++) {
+    groups.forEach(g => {
+      g.forEach(buf => { const s = ctx.createBufferSource(); s.buffer = buf; s.connect(ctx.destination); s.start(t); voiceSrcs.push(s); t += buf.duration + 0.04; });
+      t += 0.3;
+    });
+    t += 0.4;
+  }
+}
+function speakAfterBeep(line, called) {
+  stopVoice();
+  const plan = ctx ? clipPlan(called) : null;
+  const ready = plan ? Promise.all(plan.map(g => Promise.all(g.map(clip)))) : Promise.reject();
+  ready.catch(() => {});
+  wakeAudio().then(() => {
+    const w = loudBeep();
+    setTimeout(() => ready.then(playClips, () => say($('twice').value === '1' ? `${line} ${line}` : line)), w);
+  });
+}
 document.addEventListener('pointerdown', () => { if (ctx) setupAudio(); }, true);
 // Calls are short: "Black 4, White 5."
 const callLine = called => called.map(c => `${tname(c.i)} ${c.nums.join(' and ')}`).join(', ') + '.';
@@ -403,7 +448,7 @@ function flash() { const el = $('topBar'); el.classList.remove('flash'); void el
 
 // ---------- Calls ----------
 function fire() {
-  if (simple()) { speakAfterBeep('Sub.'); addLog('Sub'); $('status').textContent = 'Sub called'; flash(); return; }
+  if (simple()) { speakAfterBeep('Sub.', []); addLog('Sub'); $('status').textContent = 'Sub called'; flash(); return; }
   snapshot();
   const called = toCall();
   const skipped = [0, 1].filter(i => credit[i]);
@@ -412,7 +457,7 @@ function fire() {
   if (skipped.length) addLog(skipped.map(i => tname(i)).join(' and ') + ' skipped (already subbed early)');
   if (!called.length && skipped.length) $('status').textContent = 'No call, both teams already subbed early';
   if (called.length) {
-    speakAfterBeep(callLine(called));
+    speakAfterBeep(callLine(called), called);
     const txt = called.map(c => `${tname(c.i)} ${c.nums.map(n => '#' + n).join(' & ')}`).join(', ');
     addLog(txt + ' off'); $('status').textContent = 'Called ' + txt;
   }
@@ -421,7 +466,7 @@ function fire() {
 function earlySub(i, n) {
   snapshot();
   moveToEnd(teams[i], [n]);
-  if ($('announceEarly').value === '1') speakAfterBeep(`${tname(i)} ${n}.`);
+  if ($('announceEarly').value === '1') speakAfterBeep(`${tname(i)} ${n}.`, [{i, nums: [n]}]);
   addLog(`${tname(i)} #${n} off (early)`);
   const left = running ? deadline - Date.now() : remaining;
   const counts = $('earlyCounts').value === '1' && (running || remaining < intervalMs()) && left <= intervalMs() * 0.25;
@@ -433,7 +478,7 @@ function earlySub(i, n) {
 function checkOut(i, n) {
   snapshot();
   teams[i].out.add(n);
-  if ($('announceEarly').value === '1') speakAfterBeep(`${tname(i)} ${n}.`);
+  if ($('announceEarly').value === '1') speakAfterBeep(`${tname(i)} ${n}.`, [{i, nums: [n]}]);
   addLog(`${tname(i)} #${n} checked out`);
   $('status').textContent = `${tname(i)} #${n} checked out`;
   changed();
@@ -534,9 +579,9 @@ $('doneBtn').onclick = () => { $('settingsView').hidden = true; $('mainView').hi
 $('nowBtn').onclick = () => { setupAudio(); fire(); if (running) { deadline = Date.now() + intervalMs(); warned = false; } else remaining = intervalMs(); renderClock(); };
 $('testBtn').onclick = () => {
   setupAudio();
-  if (simple()) return speakAfterBeep('Sub.');
+  if (simple()) return speakAfterBeep('Sub.', []);
   const called = toCall();
-  if (called.length) speakAfterBeep(callLine(called));
+  if (called.length) speakAfterBeep(callLine(called), called);
 };
 $('resetBtn').onclick = resetGame;
 document.addEventListener('click', e => {

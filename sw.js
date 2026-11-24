@@ -1,6 +1,7 @@
 // Bump CACHE whenever index.html (or any cached file) changes, so iPads pick up the new version.
-const CACHE = 'subcaller-v3';
-const FILES = ['./', 'index.html', 'manifest.json', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'subcaller-v4';
+const FILES = ['./', 'index.html', 'manifest.json', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png']
+  .concat(['sub'].concat([...Array(30)].flatMap((_, k) => ['black-', 'white-', 'and-'].map(w => w + (k + 1)))).map(n => 'voice/' + n + '.mp3'));
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
